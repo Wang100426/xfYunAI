@@ -535,7 +535,7 @@ class MainWindow(QMainWindow):
         self.save_history()
 
     def init_ui(self):
-        self.setWindowTitle("讯飞星火对话客户端")
+        self.setWindowTitle("讯飞云AI version 1.8 Powered by XfYun API")
         self.setGeometry(100, 100, 1100, 700)
 
         # 全局样式

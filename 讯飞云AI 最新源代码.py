@@ -7,18 +7,22 @@ import uuid
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlparse, urlencode
-
+from PyQt5.QtWidgets import QFrame, QSystemTrayIcon, QMenu, QDesktopWidget
+from PyQt5.QtGui import QIcon
 import websocket
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QComboBox,
                              QTextBrowser, QTextEdit, QPushButton, QMessageBox,
                              QListWidget, QListWidgetItem, QDialog, QDialogButtonBox,
                              QFormLayout, QMenu, QInputDialog)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal, QSettings
 from PyQt5.QtGui import QFont, QTextCursor
 import markdown2
 import html
 from PyQt5.QtWidgets import QTabWidget
+from PyQt5.QtWidgets import QStyle
+from PyQt5.QtWidgets import QGraphicsDropShadowEffect
+from PyQt5.QtGui import QColor
 
 # ---------- 全局设置管理 ----------
 class Settings:
@@ -498,47 +502,277 @@ class ChatWorker(QThread):
             self.error.emit(err)
         else:
             self.finished.emit(reply, usage)
-# ---------- 主窗口 ----------
-# ---------- 主窗口 ----------
+
+class FloatingWindow(QWidget):
+    def __init__(self, main_window):
+        super().__init__(main_window)  # 设置父窗口，避免独立任务栏图标
+        self.main_window = main_window
+        self.setWindowTitle("快捷对话")
+        self.setFixedSize(500, 600)
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
+        self.setAttribute(Qt.WA_TranslucentBackground)  # 允许透明背景，用于圆角阴影
+
+        # 主容器，带圆角和阴影
+        self.container = QFrame(self)
+        self.container.setObjectName("container")
+        self.container.setStyleSheet("""
+            QFrame#container {
+                background-color: #ffffff;
+                border-radius: 15px;
+                border: 1px solid #e0e0e0;
+            }
+        """)
+        # 添加阴影效果
+        shadow = QGraphicsDropShadowEffect()
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        shadow.setOffset(0, 5)
+        self.container.setGraphicsEffect(shadow)
+
+        # 主布局（容器内部）
+        layout = QVBoxLayout(self.container)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # 标题
+        title_label = QLabel("✨ 快捷对话")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c3e50;")
+        layout.addWidget(title_label)
+
+        # 模型选择行
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("模型:"))
+        self.model_combo = QComboBox()
+        self.model_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #dcdde1;
+                border-radius: 6px;
+                padding: 6px;
+                background-color: white;
+                min-width: 180px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+        """)
+        if hasattr(main_window, 'model_combo_models'):
+            self.model_combo.addItems(main_window.model_combo_models)
+        model_layout.addWidget(self.model_combo)
+        model_layout.addStretch()
+        layout.addLayout(model_layout)
+
+        # 输入框
+        self.input_edit = QTextEdit()
+        self.input_edit.setPlaceholderText("输入消息... (Enter发送，Ctrl+Enter换行)")
+        self.input_edit.setMaximumHeight(80)
+        self.input_edit.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #dcdde1;
+                border-radius: 8px;
+                padding: 8px;
+                font-size: 14px;
+                background-color: #f9f9f9;
+            }
+            QTextEdit:focus {
+                border: 1px solid #0984e3;
+                background-color: white;
+            }
+        """)
+        layout.addWidget(self.input_edit)
+
+        # 发送按钮
+        self.send_btn = QPushButton("🚀 发送")
+        self.send_btn.setCursor(Qt.PointingHandCursor)
+        self.send_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0984e3;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #74b9ff;
+            }
+            QPushButton:pressed {
+                background-color: #0a5d9e;
+            }
+        """)
+        self.send_btn.clicked.connect(self.send_message)
+        layout.addWidget(self.send_btn)
+
+        # 活动请求标题
+        request_title = QLabel("⏳ 当前活动请求")
+        request_title.setStyleSheet("font-size: 13px; font-weight: 500; color: #7f8c8d; margin-top: 5px;")
+        layout.addWidget(request_title)
+
+        # 活动请求列表
+        self.request_list = QListWidget()
+        self.request_list.setMaximumHeight(100)
+        self.request_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                background-color: #f5f6fa;
+                padding: 5px;
+                font-size: 12px;
+            }
+            QListWidget::item {
+                border-bottom: 1px dashed #dcdde1;
+                padding: 5px;
+                color: #2d3436;
+            }
+            QListWidget::item:last-child {
+                border-bottom: none;
+            }
+        """)
+        layout.addWidget(self.request_list)
+
+        # 调整容器位置（居中显示）
+        container_layout = QHBoxLayout(self)
+        container_layout.addWidget(self.container)
+        self.setLayout(container_layout)
+
+        # 定时刷新活动请求
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.refresh_requests)
+        self.timer.start(1000)
+
+        # 窗口可拖动（可选）
+        self.drag_position = None
+        self.container.mousePressEvent = self.mouse_press
+        self.container.mouseMoveEvent = self.mouse_move
+
+    def mouse_press(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouse_move(self, event):
+        if event.buttons() == Qt.LeftButton and self.drag_position is not None:
+            self.move(event.globalPos() - self.drag_position)
+            event.accept()
+
+    def refresh_requests(self):
+        self.request_list.clear()
+        for conv_id, info in self.main_window.active_requests.items():
+            elapsed = time.time() - info["start_time"]
+            item_text = f"{info['conv_name'][:12]}... | {info['model']} | {elapsed:.1f}s"
+            self.request_list.addItem(item_text)
+
+    def send_message(self):
+        text = self.input_edit.toPlainText().strip()
+        if not text:
+            return
+        model = self.model_combo.currentText()
+        self.input_edit.clear()
+        self.main_window.send_from_floating_window(text, model)
+
+    def closeEvent(self, event):
+        # 隐藏而不是关闭
+        self.hide()
+        event.ignore()# ---------- 主窗口 ----------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = Settings()
         self.conversations = []
         self.current_conv_index = -1
-        self.active_requests = {}  # 键: conv.id, 值: {"worker": worker, "start_time": time.time(), "model": model_version, "conv_name": conv.name}
+        self.active_requests = {}
         self.history_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_history.json")
-        self.last_send_time = 0  # 记录最后一次发送消息的时间（备用）
+        self.last_send_time = 0
+
         self.init_ui()
         self.load_history()
         self.refresh_model_combo()
+
         if not self.conversations:
             self.create_default_conversation()
-        pass
 
-    def update_new_btn_state(self):
-        """根据对话列表是否为空，设置新建按钮的启用状态"""
-        has_convs = len(self.conversations) > 0
-        self.new_btn.setEnabled(has_convs)
+        # 系统托盘图标
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+        self.tray_icon.activated.connect(self.tray_icon_activated)
+
+        tray_menu = QMenu()
+        show_action = tray_menu.addAction("显示主窗口")
+        show_action.triggered.connect(self.show_normal)
+        show_floating = tray_menu.addAction("显示悬浮窗")
+        show_floating.triggered.connect(self.show_floating_window)
+        tray_menu.addSeparator()
+        quit_action = tray_menu.addAction("退出")
+        quit_action.triggered.connect(self.close_application)
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.show()
+
+        # 悬浮窗
+        self.floating_window = FloatingWindow(self)
+
+        # 保存模型列表供悬浮窗使用
+        self.model_combo_models = [self.model_combo.itemText(i) for i in range(self.model_combo.count())]
+        self.floating_window.model_combo.clear()
+        self.floating_window.model_combo.addItems(self.model_combo_models)
+
+    def close_application(self):
+        self.tray_icon.hide()
+        QApplication.quit()
+
+    def tray_icon_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.show_normal()
+
+    def show_normal(self):
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+        # 如果悬浮窗可见，则关闭它
+        if hasattr(self, 'floating_window') and self.floating_window.isVisible():
+            self.floating_window.hide()
+
+    def show_floating_window(self):
+        self.floating_window.show()
+        qr = self.floating_window.frameGeometry()
+        cp = QDesktopWidget().availableGeometry().center()
+        qr.moveCenter(cp)
+        self.floating_window.move(qr.topLeft())
+
+    def send_from_floating_window(self, text, model):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conv_name = f"悬浮窗 {now}"
+        conv = Conversation(conv_name, model)
+        self.conversations.append(conv)
+        self.refresh_conv_list()
+        for i, c in enumerate(self.conversations):
+            if c.id == conv.id:
+                self.switch_to_conversation(i)
+                break
+        self.input_edit.setText(text)
+        self.send_message()
+        self.show_normal()
 
     def create_default_conversation(self):
-        """创建默认的第一条对话"""
-        default_model = self.model_combo.currentText()  # 获取当前选中的模型
+        default_model = self.model_combo.currentText()
         conv = Conversation("第一条对话", default_model)
         self.conversations.append(conv)
         self.refresh_conv_list()
-        # 切换到新创建的对话
         for i, c in enumerate(self.conversations):
             if c.id == conv.id:
                 self.switch_to_conversation(i)
                 break
         self.save_history()
 
+    def update_new_btn_state(self):
+        has_convs = len(self.conversations) > 0
+        self.new_btn.setEnabled(has_convs)
+
     def init_ui(self):
-        self.setWindowTitle("讯飞云AI version 1.8 Powered by XfYun API")
+        self.setWindowTitle("讯飞星火对话客户端")
         self.setGeometry(100, 100, 1100, 700)
 
-        # 全局样式
+        # 全局样式（此处省略，请保持您原有的样式表）
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #f5f6fa;
@@ -680,10 +914,9 @@ class MainWindow(QMainWindow):
         # ========== 左侧侧栏底部按钮容器 ==========
         bottom_buttons_widget = QWidget()
         bottom_buttons_layout = QVBoxLayout(bottom_buttons_widget)
-        bottom_buttons_layout.setContentsMargins(10, 0, 10, 10)  # 左右边距10px，底部10px
-        bottom_buttons_layout.setSpacing(5)  # 按钮间距5px
+        bottom_buttons_layout.setContentsMargins(10, 0, 10, 10)
+        bottom_buttons_layout.setSpacing(5)
 
-        # 活动请求按钮
         self.activity_btn = QPushButton("📊 活动请求")
         self.activity_btn.setFixedHeight(60)
         self.activity_btn.setStyleSheet("""
@@ -704,7 +937,6 @@ class MainWindow(QMainWindow):
         self.activity_btn.clicked.connect(self.show_active_requests)
         bottom_buttons_layout.addWidget(self.activity_btn)
 
-        # 设置按钮
         settings_btn = QPushButton("⚙️ 设置")
         settings_btn.setFixedHeight(60)
         settings_btn.setStyleSheet("""
@@ -736,7 +968,6 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(20, 20, 20, 20)
         right_layout.setSpacing(15)
 
-        # 顶部工具栏
         top_bar = QWidget()
         top_bar.setStyleSheet("background-color: white; border-radius: 8px; padding: 10px;")
         top_bar_layout = QHBoxLayout(top_bar)
@@ -746,13 +977,13 @@ class MainWindow(QMainWindow):
         self.conv_name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2f3640; border: none;")
         top_bar_layout.addWidget(self.conv_name_label)
         top_bar_layout.addStretch()
-        
+
         model_label = QLabel("选择模型")
         model_label.setStyleSheet("color: #636e72; font-weight: 500; border: none;")
         top_bar_layout.addWidget(model_label)
-        
+
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["Spark Lite", "Spark X1.5", "Spark X2", "Spark Pro", "Kimi K2.5", "MiniMax 2.5", "Qwen3-1.7B", "GLM-5", "Hunyuan-MT-7B"]) # 选择模型列表
+        self.model_combo.addItems(["Spark Lite", "Spark X1.5", "Spark X2", "Spark Pro", "Kimi K2.5", "MiniMax 2.5", "Qwen3-1.7B", "GLM-5", "Hunyuan-MT-7B"])
         self.model_combo.currentTextChanged.connect(self.on_model_changed)
         top_bar_layout.addWidget(self.model_combo)
 
@@ -760,7 +991,6 @@ class MainWindow(QMainWindow):
 
         self.chat_display = QTextBrowser()
         self.chat_display.setOpenExternalLinks(False)
-        # 移除默认边框，使用样式表控制
         self.chat_display.setFrameShape(QTextBrowser.NoFrame)
         right_layout.addWidget(self.chat_display, 1)
 
@@ -778,7 +1008,7 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("AI 思考中，请稍候...")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setStyleSheet("color: #7f8c8d; font-size: 12px; padding: 2px;")
-        self.status_label.setVisible(False)  # 初始隐藏
+        self.status_label.setVisible(False)
         input_layout.addWidget(self.status_label)
 
         btn_layout = QHBoxLayout()
@@ -797,23 +1027,18 @@ class MainWindow(QMainWindow):
         self.input_edit.installEventFilter(self)
         self.update_ui_for_current_conv()
 
+    # 以下为其他方法（请保持原有实现不变）
     def update_activity_button(self):
-        """更新活动请求按钮文本"""
         count = len(self.active_requests)
-        if count > 0:
-            self.activity_btn.setText(f"📊 活动请求 ({count})")
-        else:
-            self.activity_btn.setText("📊 活动请求")
+        self.activity_btn.setText(f"📊 活动请求 ({count})" if count else "📊 活动请求")
 
     def eventFilter(self, obj, event):
         if obj == self.input_edit and event.type() == event.KeyPress:
             if event.key() == Qt.Key_Return:
                 if event.modifiers() == Qt.ControlModifier:
-                    # Ctrl+Enter 插入换行
                     self.input_edit.insertPlainText("\n")
                     return True
                 else:
-                    # 单独 Enter 发送
                     self.send_message()
                     return True
         return super().eventFilter(obj, event)
@@ -835,10 +1060,10 @@ class MainWindow(QMainWindow):
                 self.conversations = [Conversation.from_dict(d) for d in data]
             self.refresh_conv_list()
             if self.conversations:
-                self.switch_to_conversation(0)  # 默认选中最新对话
+                self.switch_to_conversation(0)
         except Exception as e:
             print(f"加载历史失败: {e}")
-        self.update_new_btn_state()  # 加载后更新按钮状态
+        self.update_new_btn_state()
 
     def new_conversation(self):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -847,7 +1072,6 @@ class MainWindow(QMainWindow):
         conv = Conversation(name, default_model)
         self.conversations.append(conv)
         self.refresh_conv_list()
-        # 找到新对话的索引并切换
         for i, c in enumerate(self.conversations):
             if c.id == conv.id:
                 self.switch_to_conversation(i)
@@ -858,13 +1082,10 @@ class MainWindow(QMainWindow):
         item = self.conv_list.itemAt(pos)
         if not item:
             return
-
         menu = QMenu(self)
         rename_action = menu.addAction("重命名")
         delete_action = menu.addAction("删除")
-
         action = menu.exec_(self.conv_list.mapToGlobal(pos))
-        
         if action == rename_action:
             self.rename_conversation(item)
         elif action == delete_action:
@@ -875,7 +1096,6 @@ class MainWindow(QMainWindow):
         conv = next((c for c in self.conversations if c.id == conv_id), None)
         if not conv:
             return
-
         new_name, ok = QInputDialog.getText(self, "重命名对话", "请输入新名称:", text=conv.name)
         if ok and new_name.strip():
             conv.name = new_name.strip()
@@ -886,35 +1106,27 @@ class MainWindow(QMainWindow):
 
     def delete_conversation(self, item):
         conv_id = item.data(Qt.UserRole)
-        # 如果该对话有活跃请求，进行安全停止
         if conv_id in self.active_requests:
             req_info = self.active_requests[conv_id]
             worker = req_info["worker"]
-            # 断开信号连接，防止完成时操作已删除的对话
             try:
                 worker.finished.disconnect()
                 worker.error.disconnect()
             except:
                 pass
-            # 请求线程停止
             worker.stop()
-            # 从活跃请求中移除，避免影响按钮状态
             del self.active_requests[conv_id]
             self.update_activity_button()
-            # 更新当前会话控件状态（如果当前会话是该会话）
             if self.current_conv_index >= 0 and self.conversations[self.current_conv_index].id == conv_id:
                 self.update_ui_for_current_conv()
-            # 等待线程结束（最多2秒）
             if worker.isRunning():
                 worker.wait(2000)
 
-        # 确认删除
-        reply = QMessageBox.question(self, "确认删除", "确定要删除这个对话吗？", 
-                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        reply = QMessageBox.question(self, "确认删除", "确定要删除这个对话吗？",
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.conversations = [c for c in self.conversations if c.id != conv_id]
             self.refresh_conv_list()
-
             if not self.conversations:
                 self.current_conv_index = -1
                 self.chat_display.clear()
@@ -922,7 +1134,6 @@ class MainWindow(QMainWindow):
                 self.update_ui_for_current_conv()
             else:
                 self.switch_to_conversation(0)
-
             self.save_history()
 
     def on_conversation_selected(self, item):
@@ -943,7 +1154,7 @@ class MainWindow(QMainWindow):
         self.model_combo.blockSignals(False)
         self.load_conversation_history(conv)
         self.update_ui_for_current_conv()
-        self.status_label.setVisible(False)  # 切换对话时隐藏等待提示
+        self.status_label.setVisible(False)
         self.conv_list.setCurrentRow(index)
 
     def load_conversation_history(self, conv):
@@ -952,7 +1163,6 @@ class MainWindow(QMainWindow):
             self.append_message(msg["role"], msg["content"])
 
     def append_message(self, role, content, usage=None, elapsed=None, model_name=None):
-        """将一条消息插入聊天显示区域，支持Markdown渲染和tokens显示，并通过段落格式强制消息间间距"""
         if role == "user":
             content_html = html.escape(content).replace('\\n', '<br>')
             full_html = f"""
@@ -963,16 +1173,10 @@ class MainWindow(QMainWindow):
                 </div>
             </div>
             """
-        else:  # assistant
+        else:
             content_html = markdown2.markdown(
                 content,
-                extras=[
-                    'fenced-code-blocks',
-                    'break-on-newline',
-                    'tables',
-                    'header-ids',
-                    'cuddled-lists'
-                ]
+                extras=['fenced-code-blocks', 'break-on-newline', 'tables', 'header-ids', 'cuddled-lists']
             )
             tokens_html = ""
             if usage and "text" in usage:
@@ -985,14 +1189,11 @@ class MainWindow(QMainWindow):
                     ↑ tokens: 本次使用 {total} (prompt {prompt} + completion {completion})
                 </div>
                 """
-
-            # 使用传入的 model_name，如果没有则回退到当前会话的模型名（但理论上不会发生）
             if model_name is None and self.current_conv_index >= 0:
                 model_name = self.conversations[self.current_conv_index].model_version
             name_display = model_name if model_name else "模型"
             if elapsed is not None:
                 name_display += f" (用时 {elapsed:.1f}s)"
-
             full_html = f"""
             <div style='width: 100%; display: flex; justify-content: flex-end; margin-bottom: 0px;'>
                 <div style='background-color: #f1f2f6; padding: 12px 16px 24px 16px; border-radius: 12px 12px 0 12px; max-width: 80%; font-size: 16px;'>
@@ -1004,25 +1205,20 @@ class MainWindow(QMainWindow):
                 </div>
             </div>
             """
-
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.insertHtml(full_html)
-
-        # 插入一个空白段落，并设置其上边距，实现消息间的间距
         cursor.insertBlock()
         block_format = cursor.blockFormat()
         block_format.setTopMargin(40)
         cursor.setBlockFormat(block_format)
         cursor.insertText('')
-
         self.chat_display.setTextCursor(cursor)
         self.chat_display.ensureCursorVisible()
 
     def update_ui_for_current_conv(self):
         has_conv = self.current_conv_index >= 0
         credentials_ok = bool(self.settings.app_id and self.settings.api_key and self.settings.api_secret)
-        # 检查当前会话是否有活跃请求
         sending_disabled = False
         if has_conv:
             conv_id = self.conversations[self.current_conv_index].id
@@ -1048,13 +1244,11 @@ class MainWindow(QMainWindow):
 
         conv = self.conversations[self.current_conv_index]
 
-        # 将用户消息加入历史和显示
         conv.add_message("user", user_input)
         self.append_message("user", user_input)
         self.save_history()
         self.input_edit.clear()
 
-        # 创建客户端
         try:
             client = XunFeiSparkClient(
                 self.settings.app_id,
@@ -1064,24 +1258,21 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, "错误", f"创建客户端失败: {e}")
-            # 移除刚添加的用户消息
             conv.messages.pop()
             self.update_ui_for_current_conv()
             return
 
-        # 启动工作线程
         self.worker = ChatWorker(
             client,
-            conv.messages,  # 包含所有历史消息（包括刚添加的user）
-            "",  # user_input 已经包含在 messages 中
+            conv.messages,
+            "",
             self.settings.temperature,
             self.settings.max_tokens
         )
-        current_model = conv.model_version  # 记录发送时使用的模型
+        current_model = conv.model_version
         self.worker.finished.connect(lambda reply, usage: self.on_reply_received(reply, usage, conv, current_model))
         self.worker.error.connect(lambda err: self.on_error(err, conv))
-        self.last_send_time = time.time()  # 记录发送时刻
-        # 加入活跃请求（使用 current_model）
+        self.last_send_time = time.time()
         self.active_requests[conv.id] = {
             "worker": self.worker,
             "start_time": self.last_send_time,
@@ -1089,31 +1280,23 @@ class MainWindow(QMainWindow):
             "conv_name": conv.name
         }
         self.update_activity_button()
-        # 禁用控件（此时 active_requests 已有该会话）
         self.update_ui_for_current_conv()
         self.worker.start()
 
     def on_reply_received(self, reply, usage, conv, model_used):
-        # 从 active_requests 获取开始时间
         req_info = self.active_requests.get(conv.id)
-        if req_info:
-            elapsed = time.time() - req_info["start_time"]
-        else:
-            elapsed = 0
+        elapsed = time.time() - req_info["start_time"] if req_info else 0
         conv.add_message("assistant", reply)
         self.append_message("assistant", reply, usage=usage, elapsed=elapsed, model_name=model_used)
         self.save_history()
-
         if conv.id in self.active_requests:
             del self.active_requests[conv.id]
             self.update_activity_button()
-        # 如果当前会话是该会话，更新控件状态
         if self.current_conv_index >= 0 and self.conversations[self.current_conv_index].id == conv.id:
             self.update_ui_for_current_conv()
 
     def on_error(self, err_msg, conv):
         QMessageBox.critical(self, "错误", err_msg)
-        # 移除之前添加的用户消息
         if conv.messages and conv.messages[-1]["role"] == "user":
             conv.messages.pop()
         if conv.id in self.active_requests:
@@ -1142,19 +1325,15 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
     def open_settings(self):
-        """打开设置对话框"""
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec_() == QDialog.Accepted:
             self.update_ui_for_current_conv()
             self.refresh_model_combo()
-            # 如果对话列表为空，自动创建第一个对话
             if len(self.conversations) == 0:
                 self.new_conversation()
             QMessageBox.information(self, "提示", "设置已保存。")
 
     def refresh_model_combo(self):
-        """合并内置模型和自定义模型，更新下拉框和客户端配置"""
-        # 内置模型（硬编码）
         builtin_models = {
             "Spark Lite": {"url": "wss://spark-api.xf-yun.com/v1.1/chat", "domain": "lite"},
             "Spark X1.5": {"url": "wss://spark-api.xf-yun.com/v1/x1", "domain": "spark-x"},
@@ -1166,56 +1345,42 @@ class MainWindow(QMainWindow):
             "GLM-5": {"url": "wss://maas-api.cn-huabei-1.xf-yun.com/v1.1/chat", "domain": "xopglm5"},
             "Hunyuan-MT-7B": {"url": "wss://maas-api.cn-huabei-1.xf-yun.com/v1.1/chat", "domain": "xophunyuan7bmt"},
         }
-
-        # 自定义模型
         custom_models = {}
         for m in self.settings.custom_models:
             custom_models[m['name']] = {"url": m['url'], "domain": m['domain']}
-
-        # 合并，自定义模型会覆盖同名内置模型（如果需要）
         merged = builtin_models.copy()
         merged.update(custom_models)
-
-        # 更新 XunFeiSparkClient 的类变量
         XunFeiSparkClient.MODEL_CONFIG = merged
-
-        # 更新下拉框
         current_model = self.model_combo.currentText()
         self.model_combo.clear()
         self.model_combo.addItems(sorted(merged.keys()))
-
-        # 如果当前对话使用的模型在新列表中，则选中它；否则选中第一个
         if self.current_conv_index >= 0:
             conv = self.conversations[self.current_conv_index]
             if conv.model_version in merged:
                 self.model_combo.setCurrentText(conv.model_version)
             else:
-                # 如果当前模型不存在（可能被删除了），切换到第一个
                 if merged:
                     first_model = sorted(merged.keys())[0]
                     self.model_combo.setCurrentText(first_model)
                     conv.model_version = first_model
-                    self.conv_name_label.setText(conv.name)  # 名称不变
+                    self.conv_name_label.setText(conv.name)
         else:
-            # 没有对话时，默认选中第一个
             if merged:
                 self.model_combo.setCurrentIndex(0)
 
+        # 更新悬浮窗的模型列表
+        if hasattr(self, 'floating_window'):
+            self.model_combo_models = [self.model_combo.itemText(i) for i in range(self.model_combo.count())]
+            self.floating_window.model_combo.clear()
+            self.floating_window.model_combo.addItems(self.model_combo_models)
+
     def refresh_conv_list(self):
-        """按创建时间降序排序对话列表，并重新填充左侧列表"""
-        # 按 created_at 降序排序
         self.conversations.sort(key=lambda c: c.created_at, reverse=True)
-        
-        # 清空列表控件
         self.conv_list.clear()
-        
-        # 重新添加所有对话项
         for conv in self.conversations:
             item = QListWidgetItem(conv.name)
             item.setData(Qt.UserRole, conv.id)
             self.conv_list.addItem(item)
-        
-        # 如果当前有选中的对话，根据 ID 重新高亮它
         if self.current_conv_index >= 0 and self.current_conv_index < len(self.conversations):
             current_id = self.conversations[self.current_conv_index].id
             for i, conv in enumerate(self.conversations):
@@ -1225,8 +1390,21 @@ class MainWindow(QMainWindow):
                     break
         else:
             self.current_conv_index = -1
-        self.update_new_btn_state()  # 更新按钮状态
+        self.update_new_btn_state()
 
+    def closeEvent(self, event):
+        event.ignore()
+        self.hide()
+        # 自动显示悬浮窗
+        if hasattr(self, 'floating_window') and self.floating_window:
+            self.floating_window.show()
+            self.floating_window.raise_()
+        self.tray_icon.showMessage(
+            "提示",
+            "主窗口已隐藏，悬浮窗已自动显示。",
+            QSystemTrayIcon.Information,
+            2000
+        )
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     # 设置全局字体为微软雅黑
